@@ -1,0 +1,76 @@
+# ────────────────────────────────────────────
+# Environment
+# ────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ────────────────────────────────────────────
+# Python
+# ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.mypy_cache/
+.ruff_cache/
+
+# ────────────────────────────────────────────
+# Node.js / Next.js
+# ────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ────────────────────────────────────────────
+# Storage (local dev data)
+# ────────────────────────────────────────────
+storage/*
+!storage/.gitkeep
+
+# ────────────────────────────────────────────
+# Docker
+# ────────────────────────────────────────────
+# Docker volumes are in docker-compose, no local files
+
+# ────────────────────────────────────────────
+# IDE
+# ────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ────────────────────────────────────────────
+# ML artifacts (can be large)
+# ────────────────────────────────────────────
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+wandb/
+
+# ────────────────────────────────────────────
+# Logs
+# ────────────────────────────────────────────
+logs/
+*.log
