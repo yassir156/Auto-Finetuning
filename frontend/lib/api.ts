@@ -121,13 +121,15 @@ export async function uploadFiles(
   kind: string
 ): Promise<{ files: FileInfo[] }> {
   const form = new FormData();
-  form.set("kind", kind);
   files.forEach((f) => form.append("files", f));
 
-  const res = await fetch(`${BASE_URL}/projects/${projectId}/files/upload`, {
-    method: "POST",
-    body: form,
-  });
+  const res = await fetch(
+    `${BASE_URL}/projects/${projectId}/files/upload?kind=${encodeURIComponent(kind)}`,
+    {
+      method: "POST",
+      body: form,
+    }
+  );
 
   if (!res.ok) {
     const body: ApiError = await res.json().catch(() => ({

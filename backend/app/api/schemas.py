@@ -282,7 +282,7 @@ class TrainHyperparams(BaseModel):
 
 
 class TrainStartRequest(BaseModel):
-    method: str = Field(..., pattern=r"^(lora|qlora)$")
+    method: str = Field(..., pattern=r"^(lora|qlora|dora|ia3|prefix|full)$")
     hyperparams: Optional[TrainHyperparams] = None
 
 

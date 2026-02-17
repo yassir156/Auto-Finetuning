@@ -211,10 +211,13 @@ def check_hardware(request: Request):
             )
             result.warnings.append("VRAM too low for fine-tuning")
     elif not result.cuda_available:
+        result.recommended_method = "lora"
         result.recommendation_reason = (
-            "No CUDA GPU detected. GPU fine-tuning not possible on this machine."
+            "No CUDA GPU detected. CPU training with LoRA is possible but slow. "
+            "QLoRA requires CUDA and will be auto-downgraded to LoRA."
         )
-        result.warnings.append("No NVIDIA GPU found. Consider using a cloud GPU instance.")
+        result.warnings.append("No NVIDIA GPU found. CPU training is very slow — use small models (<3B params).")
+        result.warnings.append("QLoRA requires CUDA; LoRA will be used instead.")
 
     if not result.warnings and result.cuda_available:
         result.notes.append("All checks passed")

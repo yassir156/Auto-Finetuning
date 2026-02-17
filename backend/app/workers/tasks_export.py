@@ -21,6 +21,7 @@ from app.core.logging import get_logger
 from app.db.models import Job, JobStatus, Project, Run
 from app.db.session import SessionLocal
 from app.workers.celery_app import celery_app
+from app.workers.utils import safe_update_job as _safe_update_job
 
 logger = get_logger(__name__)
 
@@ -31,21 +32,6 @@ def _get_db():
         yield db
     finally:
         db.close()
-
-
-def _safe_update_job(db, job_id: str, **kwargs):
-    try:
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job:
-            for k, v in kwargs.items():
-                setattr(job, k, v)
-            db.commit()
-    except Exception:
-        logger.exception("task.export.job_update_failed", job_id=job_id)
-        try:
-            db.rollback()
-        except Exception:
-            pass
 
 
 @celery_app.task(

@@ -92,6 +92,10 @@ class JobStatus(str, enum.Enum):
 class FinetuneMethod(str, enum.Enum):
     lora = "lora"
     qlora = "qlora"
+    dora = "dora"
+    ia3 = "ia3"
+    prefix = "prefix"
+    full = "full"
 
 
 class DatasetSplit(str, enum.Enum):
@@ -139,21 +143,22 @@ class Project(Base):
         nullable=False,
     )
 
-    # Relationships
+    # Relationships — use lazy="select" (default on-access) to avoid
+    # loading thousands of related rows on every Project query.
     files: Mapped[list["File"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="project", cascade="all, delete-orphan", lazy="select"
     )
     chunks: Mapped[list["Chunk"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="project", cascade="all, delete-orphan", lazy="select"
     )
     jobs: Mapped[list["Job"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="project", cascade="all, delete-orphan", lazy="select"
     )
     dataset_examples: Mapped[list["DatasetExample"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="project", cascade="all, delete-orphan", lazy="select"
     )
     runs: Mapped[list["Run"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="project", cascade="all, delete-orphan", lazy="select"
     )
 
     __table_args__ = (
@@ -195,7 +200,7 @@ class File(Base):
     # Relationships
     project: Mapped["Project"] = relationship(back_populates="files")
     chunks: Mapped[list["Chunk"]] = relationship(
-        back_populates="source_file", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="source_file", cascade="all, delete-orphan", lazy="select"
     )
 
     __table_args__ = (
@@ -233,7 +238,7 @@ class Chunk(Base):
     project: Mapped["Project"] = relationship(back_populates="chunks")
     source_file: Mapped["File"] = relationship(back_populates="chunks")
     dataset_examples: Mapped[list["DatasetExample"]] = relationship(
-        back_populates="source_chunk", lazy="selectin"
+        back_populates="source_chunk", lazy="select"
     )
 
     __table_args__ = (

@@ -19,6 +19,7 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
+    pool_recycle=1800,      # Recycle connections every 30 min (prevents stale connections in Celery workers)
     echo=settings.DEBUG,
 )
 

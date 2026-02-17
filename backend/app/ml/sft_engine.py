@@ -1,12 +1,14 @@
 """
 FineTuneFlow — SFT Engine.
 
-Provides SFTEngine class for LoRA/QLoRA fine-tuning using:
+Provides SFTEngine class for fine-tuning using:
   - transformers (AutoModelForCausalLM, AutoTokenizer)
   - trl (SFTTrainer)
-  - peft (LoraConfig, prepare_model_for_kbit_training)
+  - peft (LoraConfig, IA3Config, PrefixTuningConfig)
   - bitsandbytes (BitsAndBytesConfig for 4-bit QLoRA)
   - Redis Pub/Sub for streaming training logs
+
+Supported methods: lora, qlora, dora, ia3, prefix, full
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from typing import Any, Optional
 import redis
 import torch
 from datasets import Dataset, load_dataset
-from peft import LoraConfig, prepare_model_for_kbit_training
+from peft import IA3Config, LoraConfig, PrefixTuningConfig, prepare_model_for_kbit_training
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -83,6 +85,26 @@ QLORA_DEFAULTS = {
     "bnb_4bit_use_double_quant": True,
 }
 
+DORA_DEFAULTS = {
+    **LORA_DEFAULTS,
+    "use_dora": True,
+}
+
+IA3_DEFAULTS = {
+    "task_type": "CAUSAL_LM",
+    "target_modules": "auto",
+    "feedforward_modules": "auto",
+}
+
+PREFIX_DEFAULTS = {
+    "task_type": "CAUSAL_LM",
+    "num_virtual_tokens": 20,
+}
+
+# Methods that use a PEFT adapter (vs full fine-tuning)
+PEFT_METHODS = {"lora", "qlora", "dora", "ia3", "prefix"}
+ALL_METHODS = PEFT_METHODS | {"full"}
+
 VRAM_TIGHT_ADJUSTMENTS = {
     "per_device_train_batch_size": 1,
     "per_device_eval_batch_size": 1,
@@ -117,7 +139,7 @@ class TrainingConfig:
     """Configuration for a single training run."""
 
     base_model_id: str
-    method: str  # "lora" or "qlora"
+    method: str  # "lora", "qlora", "dora", "ia3", "prefix", "full"
     output_dir: str
     train_file: str
     eval_file: Optional[str] = None
@@ -143,10 +165,13 @@ class TrainingConfig:
     load_best_model_at_end: bool = True
     early_stopping_patience: int = 3
 
-    # LoRA
+    # LoRA / DoRA
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
+
+    # Prefix Tuning
+    num_virtual_tokens: int = 20
 
     # Redis pub/sub for streaming
     redis_url: Optional[str] = None
@@ -170,7 +195,12 @@ class TrainingConfig:
     ) -> TrainingConfig:
         """Create config from user-supplied hyperparams, falling back to defaults."""
         hp = {**TRAINING_DEFAULTS, **(hyperparams or {})}
-        lora_hp = QLORA_DEFAULTS if method == "qlora" else LORA_DEFAULTS
+        lora_hp = {
+            "qlora": QLORA_DEFAULTS,
+            "dora": DORA_DEFAULTS,
+            "ia3": IA3_DEFAULTS,
+            "prefix": PREFIX_DEFAULTS,
+        }.get(method, LORA_DEFAULTS)
 
         return cls(
             base_model_id=base_model_id,
@@ -197,9 +227,10 @@ class TrainingConfig:
             save_total_limit=hp.get("save_total_limit", TRAINING_DEFAULTS["save_total_limit"]),
             load_best_model_at_end=hp.get("load_best_model_at_end", TRAINING_DEFAULTS["load_best_model_at_end"]),
             early_stopping_patience=hp.get("early_stopping_patience", TRAINING_DEFAULTS["early_stopping_patience"]),
-            lora_r=hp.get("lora_r", lora_hp["r"]),
-            lora_alpha=hp.get("lora_alpha", lora_hp["lora_alpha"]),
-            lora_dropout=hp.get("lora_dropout", lora_hp["lora_dropout"]),
+            lora_r=hp.get("lora_r", lora_hp.get("r", 16)),
+            lora_alpha=hp.get("lora_alpha", lora_hp.get("lora_alpha", 32)),
+            lora_dropout=hp.get("lora_dropout", lora_hp.get("lora_dropout", 0.05)),
+            num_virtual_tokens=hp.get("num_virtual_tokens", lora_hp.get("num_virtual_tokens", 20)),
             redis_url=redis_url,
             pubsub_channel=pubsub_channel,
             hf_token=hf_token,
@@ -371,9 +402,9 @@ class SFTEngine:
 
         if cpu_mode:
             # CPU mode: fp32, no quantization, explicit CPU placement
-            model_kwargs["torch_dtype"] = torch.float32
+            model_kwargs["dtype"] = torch.float32
             model_kwargs["device_map"] = {"":  "cpu"}
-            # Force method to lora (qlora requires CUDA)
+            # Force qlora → lora on CPU (bitsandbytes requires CUDA)
             if self.config.method == "qlora":
                 logger.info("sft_engine.cpu_mode_forcing_lora")
                 self.config.method = "lora"
@@ -387,7 +418,7 @@ class SFTEngine:
             model_kwargs["quantization_config"] = bnb_config
             model_kwargs["device_map"] = "auto"
         else:
-            model_kwargs["torch_dtype"] = torch.bfloat16 if self.config.bf16 else torch.float16
+            model_kwargs["dtype"] = torch.bfloat16 if self.config.bf16 else torch.float16
             model_kwargs["device_map"] = "auto"
 
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -395,29 +426,78 @@ class SFTEngine:
             **model_kwargs,
         )
 
-        # NOTE: We do NOT call prepare_model_for_kbit_training() here because
-        # SFTTrainer (trl >= 0.5) handles it internally when peft_config is provided.
+        # Build PEFT config based on method
+        self.peft_config = self._build_peft_config()
 
-        # Determine target modules: "auto" doesn't work for all architectures
-        # (e.g. GPT-2 uses Conv1D), so we auto-detect linear layers.
+        logger.info(
+            "sft_engine.model_loaded",
+            method=self.config.method,
+            device="cpu" if cpu_mode else "cuda",
+            peft="none" if self.peft_config is None else type(self.peft_config).__name__,
+        )
+
+    def _build_peft_config(self):
+        """Build the PEFT config for the selected method. Returns None for full fine-tuning."""
+        method = self.config.method
+
+        if method == "full":
+            # No PEFT — train all parameters
+            return None
+
+        if method == "prefix":
+            return PrefixTuningConfig(
+                task_type="CAUSAL_LM",
+                num_virtual_tokens=self.config.num_virtual_tokens,
+            )
+
+        if method == "ia3":
+            target_modules = self._detect_target_modules()
+            # IA³ also needs feedforward_modules — use the MLP projection layers
+            ff_modules = self._detect_feedforward_modules()
+            return IA3Config(
+                task_type="CAUSAL_LM",
+                target_modules=target_modules,
+                feedforward_modules=ff_modules,
+            )
+
+        # LoRA-family: lora, qlora, dora
         target_modules = self._detect_target_modules()
+        use_dora = method == "dora"
 
-        # PEFT config
-        self.peft_config = LoraConfig(
+        return LoraConfig(
             r=self.config.lora_r,
             lora_alpha=self.config.lora_alpha,
             lora_dropout=self.config.lora_dropout,
             bias="none",
             task_type="CAUSAL_LM",
             target_modules=target_modules,
+            use_dora=use_dora,
         )
 
-        logger.info(
-            "sft_engine.model_loaded",
-            method=self.config.method,
-            device="cpu" if cpu_mode else "cuda",
-            target_modules=target_modules,
-        )
+    def _detect_feedforward_modules(self) -> list[str]:
+        """Detect MLP/feedforward module names for IA³."""
+        ff_names = set()
+        for name, module in self.model.named_modules():
+            cls_name = type(module).__name__
+            short_name = name.split(".")[-1]
+            # Common MLP layer names across architectures
+            if cls_name in ("Linear", "Conv1D") and short_name in (
+                "c_fc", "c_proj",          # GPT-2
+                "gate_proj", "up_proj", "down_proj",  # LLaMA / Mistral
+                "fc1", "fc2",             # OPT
+                "dense_h_to_4h", "dense_4h_to_h",  # GPT-NeoX
+                "wi", "wo", "wi_0", "wi_1",  # T5
+            ):
+                ff_names.add(short_name)
+
+        if ff_names:
+            modules = sorted(ff_names)
+            logger.info("sft_engine.feedforward_modules_detected", modules=modules)
+            return modules
+
+        # Fallback — most LLaMA-family models
+        logger.warning("sft_engine.feedforward_modules_fallback")
+        return ["down_proj"]
 
     def _detect_target_modules(self) -> list[str]:
         """Auto-detect LoRA target modules from the model architecture.
@@ -500,6 +580,12 @@ class SFTEngine:
         optim = "adamw_torch" if cpu_mode else cfg.optim
         gradient_checkpointing = False if cpu_mode else cfg.gradient_checkpointing
         use_cpu = cpu_mode
+        learning_rate = cfg.learning_rate
+
+        # Full fine-tuning needs a smaller learning rate to avoid catastrophic forgetting
+        if cfg.method == "full" and cfg.learning_rate >= 2e-4:
+            learning_rate = 2e-5
+            logger.info("sft_engine.full_ft_lr_override", lr=learning_rate)
 
         if cpu_mode:
             logger.info("sft_engine.cpu_training_args")
@@ -508,7 +594,7 @@ class SFTEngine:
             output_dir=cfg.output_dir,
             max_seq_length=cfg.max_seq_length,
             num_train_epochs=cfg.num_epochs,
-            learning_rate=cfg.learning_rate,
+            learning_rate=learning_rate,
             per_device_train_batch_size=cfg.per_device_train_batch_size,
             per_device_eval_batch_size=cfg.per_device_eval_batch_size,
             gradient_accumulation_steps=cfg.gradient_accumulation_steps,
@@ -601,11 +687,14 @@ class SFTEngine:
         train_result = self.trainer.train()
         logger.info("sft_engine.training_end")
 
-        # 6. Save adapter + tokenizer
+        # 6. Save model + tokenizer
+        # For PEFT methods, save_pretrained only saves adapter weights.
+        # For full FT, save_pretrained saves the entire model.
+        # Both cases use the same API — PeftModel vs plain model handles the rest.
         adapter_dir = os.path.join(self.config.output_dir, "adapter")
         self.trainer.model.save_pretrained(adapter_dir)
         self.tokenizer.save_pretrained(adapter_dir)
-        logger.info("sft_engine.adapter_saved", path=adapter_dir)
+        logger.info("sft_engine.adapter_saved", path=adapter_dir, method=self.config.method)
 
         # 7. Collect metrics
         metrics = train_result.metrics
@@ -684,6 +773,7 @@ def recommend_method(
             "reason": "No CUDA GPU detected. Training will run on CPU (slow but functional).",
             "can_train": True,
             "device": "cpu",
+            "available_methods": ["lora", "dora", "ia3", "prefix", "full"],
             "warnings": [
                 "CPU training is very slow — use a small model (< 3B params)",
                 "QLoRA requires CUDA; LoRA will be used instead",

@@ -37,7 +37,7 @@ export type JobStatus =
   | "failed"
   | "retrying"
   | "cancelled";
-export type FinetuneMethod = "lora" | "qlora";
+export type FinetuneMethod = "lora" | "qlora" | "dora" | "ia3" | "prefix" | "full";
 export type DatasetSplit = "preview" | "train" | "eval";
 
 // ── Error ───────────────────────────────────

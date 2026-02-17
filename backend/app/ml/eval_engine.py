@@ -67,17 +67,22 @@ class EvalEngine:
         self.tokenizer = None
 
     def _load_model_and_tokenizer(self) -> None:
-        """Load base model + PEFT adapter + tokenizer."""
+        """Load base model + PEFT adapter (or full FT model) + tokenizer."""
         logger.info("eval_engine.loading_model", model=self.base_model_id, adapter=self.adapter_dir)
+
+        is_cpu = not torch.cuda.is_available()
+        model_dtype = torch.float32 if is_cpu else torch.bfloat16
+        device_map = {"":  "cpu"} if is_cpu else "auto"
 
         model_kwargs: dict[str, Any] = {
             "trust_remote_code": False,
-            "device_map": "auto",
+            "device_map": device_map,
         }
         if self.hf_token:
             model_kwargs["token"] = self.hf_token
 
-        if self.method == "qlora":
+        # QLoRA needs bitsandbytes quantization (CUDA only)
+        if self.method == "qlora" and not is_cpu:
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16,
@@ -86,12 +91,21 @@ class EvalEngine:
             )
             model_kwargs["quantization_config"] = bnb_config
         else:
-            model_kwargs["torch_dtype"] = torch.bfloat16
+            model_kwargs["dtype"] = model_dtype
 
-        base_model = AutoModelForCausalLM.from_pretrained(
-            self.base_model_id, **model_kwargs
-        )
-        self.model = PeftModel.from_pretrained(base_model, self.adapter_dir)
+        # Detect if this is a PEFT adapter or a full fine-tuned model
+        adapter_config_path = Path(self.adapter_dir) / "adapter_config.json"
+        if adapter_config_path.exists():
+            # PEFT adapter (LoRA, QLoRA, DoRA, IA³, Prefix, etc.)
+            base_model = AutoModelForCausalLM.from_pretrained(
+                self.base_model_id, **model_kwargs
+            )
+            self.model = PeftModel.from_pretrained(base_model, self.adapter_dir)
+        else:
+            # Full fine-tuned model — load directly from adapter_dir
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.adapter_dir, **model_kwargs
+            )
         self.model.eval()
 
         tok_kwargs = {}

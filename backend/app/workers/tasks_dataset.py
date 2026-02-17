@@ -40,6 +40,7 @@ from app.services.ollama_client import generate_examples_from_chunk
 from app.services.task_registry import get_task_config, resolve_task_key
 from app.services.text_extractor import extract_text
 from app.workers.celery_app import celery_app
+from app.workers.utils import safe_update_job as _safe_update_job
 
 logger = get_logger(__name__)
 
@@ -55,24 +56,6 @@ def _get_db():
         yield db
     finally:
         db.close()
-
-
-def _safe_update_job(db, job_id: str, **kwargs):
-    """Update job fields, swallowing errors to avoid masking the original exception."""
-    try:
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job:
-            for k, v in kwargs.items():
-                setattr(job, k, v)
-            db.commit()
-        return job
-    except Exception:
-        logger.exception("Failed to update job status", job_id=job_id)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        return None
 
 
 def _update_job(db, job_id: str, **kwargs):

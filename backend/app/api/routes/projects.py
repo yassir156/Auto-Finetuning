@@ -65,6 +65,64 @@ def _project_stats(db: Session, project_id: uuid.UUID) -> ProjectStats:
     )
 
 
+def _batch_project_stats(db: Session, project_ids: list[uuid.UUID]) -> dict[uuid.UUID, ProjectStats]:
+    """Compute stats for multiple projects in bulk (avoids N+1 queries)."""
+    if not project_ids:
+        return {}
+
+    # File counts
+    file_counts = dict(
+        db.query(File.project_id, sa_func.count(File.id))
+        .filter(File.project_id.in_(project_ids))
+        .group_by(File.project_id)
+        .all()
+    )
+    # Chunk counts
+    chunk_counts = dict(
+        db.query(Chunk.project_id, sa_func.count(Chunk.id))
+        .filter(Chunk.project_id.in_(project_ids))
+        .group_by(Chunk.project_id)
+        .all()
+    )
+    # Example counts
+    example_counts = dict(
+        db.query(DatasetExample.project_id, sa_func.count(DatasetExample.id))
+        .filter(DatasetExample.project_id.in_(project_ids))
+        .group_by(DatasetExample.project_id)
+        .all()
+    )
+    # Latest job per project (using a window function / subquery)
+    from sqlalchemy import desc
+    from sqlalchemy.orm import aliased
+
+    latest_job_sq = (
+        db.query(
+            Job.project_id,
+            Job.status,
+            sa_func.row_number().over(
+                partition_by=Job.project_id, order_by=desc(Job.created_at)
+            ).label("rn"),
+        )
+        .filter(Job.project_id.in_(project_ids))
+        .subquery()
+    )
+    latest_jobs = dict(
+        db.query(latest_job_sq.c.project_id, latest_job_sq.c.status)
+        .filter(latest_job_sq.c.rn == 1)
+        .all()
+    )
+
+    result = {}
+    for pid in project_ids:
+        result[pid] = ProjectStats(
+            file_count=file_counts.get(pid, 0),
+            chunk_count=chunk_counts.get(pid, 0),
+            example_count=example_counts.get(pid, 0),
+            last_job_status=latest_jobs.get(pid),
+        )
+    return result
+
+
 def _to_response(project: Project, stats: Optional[ProjectStats] = None) -> dict:
     """Convert ORM project to response dict."""
     data = ProjectResponse.model_validate(project).model_dump()
@@ -109,11 +167,14 @@ def list_projects(
     total = q.count()
     projects = q.order_by(Project.created_at.desc()).offset(offset).limit(limit).all()
 
+    # Batch stats: 4 queries total instead of 4×N
+    project_ids = [p.id for p in projects]
+    stats_map = _batch_project_stats(db, project_ids)
+
     items = []
     for p in projects:
-        stats = _project_stats(db, p.id)
         item_data = ProjectListItem.model_validate(p).model_dump()
-        item_data["stats"] = stats.model_dump()
+        item_data["stats"] = stats_map.get(p.id, ProjectStats()).model_dump()
         items.append(item_data)
 
     return ProjectListResponse(

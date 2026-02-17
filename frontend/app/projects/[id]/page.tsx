@@ -36,6 +36,7 @@ import type {
   ModelResolveResponse,
   TaskTypeConfig,
   DatasetUploadResponse,
+  FinetuneMethod,
 } from "@/lib/types";
 import { WIZARD_STEPS, WizardStep } from "@/lib/store";
 import { Button } from "@/components/ui/button";
@@ -81,7 +82,7 @@ export default function ProjectPage() {
   const [checkingHw, setCheckingHw] = useState(false);
 
   // Training
-  const [method, setMethod] = useState<"lora" | "qlora">("qlora");
+  const [method, setMethod] = useState<FinetuneMethod>("qlora");
   const [trainStatus, setTrainStatus] = useState<TrainStatus | null>(null);
   const [trainLogs, setTrainLogs] = useState<Record<string, unknown>[]>([]);
   const [isTraining, setIsTraining] = useState(false);
@@ -100,6 +101,13 @@ export default function ProjectPage() {
   const sseCloseRef = useRef<(() => void) | null>(null);
   // Polling interval refs
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Keep a ref to trainLogs to avoid stale closures in callbacks/intervals
+  const trainLogsRef = useRef<Record<string, unknown>[]>([]);
+
+  // Sync trainLogs state → ref
+  useEffect(() => {
+    trainLogsRef.current = trainLogs;
+  }, [trainLogs]);
 
   // Cleanup SSE and polls on unmount
   useEffect(() => {
@@ -281,7 +289,7 @@ export default function ProjectPage() {
       const hw = await checkHardware();
       setHardware(hw);
       if (hw.recommended_method) {
-        setMethod(hw.recommended_method as "lora" | "qlora");
+        setMethod(hw.recommended_method as FinetuneMethod);
       }
     } catch (e: unknown) {
       setError(e && typeof e === "object" && "detail" in e ? (e as { detail: string }).detail : "Hardware check failed");
@@ -397,9 +405,10 @@ export default function ProjectPage() {
       }
 
       // Rebuild trainLogs from stored metrics (loss curves) when not streaming live
+      // Uses ref to avoid stale closure when called from interval callbacks
       if (
         status.current_metrics &&
-        trainLogs.length === 0
+        trainLogsRef.current.length === 0
       ) {
         const rebuilt: Record<string, unknown>[] = [];
         const trainCurve = status.current_metrics.train_loss_curve as
@@ -879,10 +888,14 @@ export default function ProjectPage() {
               <label className="mb-1 block text-sm font-medium">Fine-tuning Method</label>
               <Select
                 value={method}
-                onValueChange={(v) => setMethod(v as "lora" | "qlora")}
+                onValueChange={(v) => setMethod(v as FinetuneMethod)}
                 options={[
-                  { value: "qlora", label: "QLoRA (4-bit quantized)" },
-                  { value: "lora", label: "LoRA (FP16)" },
+                  { value: "qlora", label: "QLoRA — 4-bit quantized LoRA" },
+                  { value: "lora", label: "LoRA — Low-Rank Adaptation" },
+                  { value: "dora", label: "DoRA — Weight-Decomposed LoRA" },
+                  { value: "ia3", label: "IA³ — Few-param Activation Scaling" },
+                  { value: "prefix", label: "Prefix Tuning — Virtual Tokens" },
+                  { value: "full", label: "Full Fine-tuning — All Parameters" },
                 ]}
               />
             </div>

@@ -36,7 +36,7 @@ async def upload_files(
     request: Request,
     project_id: uuid.UUID,
     files: list[UploadFile],
-    kind: str = "raw_doc",
+    kind: str = Query(default="raw_doc"),
     db: Session = Depends(get_db),
     project: Project = Depends(get_project_or_404),
 ):

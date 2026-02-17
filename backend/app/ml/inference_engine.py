@@ -1,7 +1,7 @@
 """
 FineTuneFlow — Inference Engine.
 
-Loads a base model + LoRA adapter and generates text.
+Loads a base model + PEFT adapter (or full fine-tuned model) and generates text.
 Caches the model in-process so repeated requests are fast.
 """
 
@@ -31,7 +31,7 @@ def _cache_key(base_model_id: str, adapter_dir: str) -> str:
 
 
 def _load_model(base_model_id: str, adapter_dir: str):
-    """Load base model + LoRA adapter. Called under lock."""
+    """Load base model + PEFT adapter (or full fine-tuned model). Called under lock."""
     global _cached_model, _cached_tokenizer, _cached_key
 
     key = _cache_key(base_model_id, adapter_dir)
@@ -45,7 +45,7 @@ def _load_model(base_model_id: str, adapter_dir: str):
     logger.info("inference.loading_model", base_model=base_model_id, adapter=adapter_dir)
 
     is_cpu = not torch.cuda.is_available()
-    dtype = torch.float32 if is_cpu else torch.float16
+    model_dtype = torch.float32 if is_cpu else torch.float16
     device_map = {"": "cpu"} if is_cpu else "auto"
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -55,14 +55,26 @@ def _load_model(base_model_id: str, adapter_dir: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_id,
-        torch_dtype=dtype,
-        device_map=device_map,
-        trust_remote_code=True,
-    )
+    # Detect if this is a PEFT adapter or a full fine-tuned model
+    adapter_config_path = Path(adapter_dir) / "adapter_config.json"
+    if adapter_config_path.exists():
+        # PEFT adapter (LoRA, QLoRA, DoRA, IA³, Prefix, etc.)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_id,
+            dtype=model_dtype,
+            device_map=device_map,
+            trust_remote_code=True,
+        )
+        model = PeftModel.from_pretrained(base_model, adapter_dir)
+    else:
+        # Full fine-tuned model — load directly from adapter_dir
+        model = AutoModelForCausalLM.from_pretrained(
+            adapter_dir,
+            dtype=model_dtype,
+            device_map=device_map,
+            trust_remote_code=True,
+        )
 
-    model = PeftModel.from_pretrained(base_model, adapter_dir)
     model.eval()
 
     _cached_model = model
