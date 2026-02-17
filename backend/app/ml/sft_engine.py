@@ -451,9 +451,12 @@ class SFTEngine:
             )
 
         if method == "ia3":
-            target_modules = self._detect_target_modules()
+            attn_modules = self._detect_target_modules()
             # IA³ also needs feedforward_modules — use the MLP projection layers
             ff_modules = self._detect_feedforward_modules()
+            # PEFT requires feedforward_modules ⊆ target_modules,
+            # so target_modules must include both attention AND feedforward layers.
+            target_modules = list(dict.fromkeys(attn_modules + ff_modules))
             return IA3Config(
                 task_type="CAUSAL_LM",
                 target_modules=target_modules,
